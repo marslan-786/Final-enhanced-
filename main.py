@@ -46,7 +46,6 @@ def process_image_task(image_bytes: bytes, filename: str):
     status_url = GET_JOB_URL_TEMPLATE.format(job_id)
     output_url = None
     
-    # Loop for 30-40 seconds max
     for i in range(20):
         time.sleep(2) 
         try:
@@ -54,8 +53,17 @@ def process_image_task(image_bytes: bytes, filename: str):
             res_data = res.json()
             
             result = res_data.get("result", {})
+            
+            # --- FIX IS HERE ---
             if result and "output_url" in result:
-                output_url = result["output_url"]
+                raw_url = result["output_url"]
+                
+                # چیک کریں کہ کیا یہ لسٹ ہے؟ اگر ہاں تو پہلا آئٹم اٹھائیں
+                if isinstance(raw_url, list):
+                    output_url = raw_url[0]
+                else:
+                    output_url = raw_url
+                
                 break
                 
         except Exception as e:
@@ -68,8 +76,12 @@ def process_image_task(image_bytes: bytes, filename: str):
     print(f"Image Ready! Downloading from: {output_url}")
 
     # 3. Download Final Image
+    # اب یہاں بالکل صاف ستھرا URL جائے گا
     final_image_response = requests.get(output_url)
+    
+    # یہ لائن بائٹس (تصویر) واپس کرے گی، ٹیکسٹ نہیں
     return final_image_response.content
+
 
 # ================= API ENDPOINTS =================
 
