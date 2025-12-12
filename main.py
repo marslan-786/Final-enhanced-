@@ -9,7 +9,7 @@ app = FastAPI()
 # --- Configuration ---
 # ابتدائی ہیڈرز
 HEADERS = {
-    "product-serial": "08003f498d526aeaefaf015e6db91727",
+    "product-serial": "08002f498d526aeaefaf015e6db91727",
     "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Mobile Safari/537.36",
     "Origin": "https://imgupscaler.ai",
     "Referer": "https://imgupscaler.ai/"
