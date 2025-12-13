@@ -14,8 +14,11 @@ HEADERS = {
     "Referer": "https://imgupscaler.ai/"
 }
 
+# --- FIX IS HERE (Endpoints Updated) ---
+# Create Job (v2)
 CREATE_JOB_URL = "https://api.imgupscaler.ai/api/image-upscaler/v2/upscale/create-job"
-GET_JOB_URL_TEMPLATE = "https://api.imgupscaler.ai/api/image-upscaler/v1/universal_upscale/get-job/{}"
+# Get Job (Updated to v2 to match Create Job)
+GET_JOB_URL_TEMPLATE = "https://api.imgupscaler.ai/api/image-upscaler/v2/upscale/get-job/{}"
 
 def refresh_serial():
     new_serial = uuid.uuid4().hex
@@ -34,10 +37,7 @@ def process_single_attempt(image_bytes: bytes, filename: str):
         
         # API Call
         response = requests.post(CREATE_JOB_URL, headers=HEADERS, files=files, timeout=60)
-        
-        # --- PRINT RAW RESPONSE ---
         print(f"📥 [UPLOAD RESPONSE]: {response.text}") 
-        # --------------------------
 
         try:
             data = response.json()
@@ -49,6 +49,16 @@ def process_single_attempt(image_bytes: bytes, filename: str):
         if data.get("code") == 100000:
             job_id = data["result"]["job_id"]
             print(f"✅ Job ID Generated: {job_id}")
+            
+            # کبھی کبھی v2 ریسپانس میں ہی URL دے دیتا ہے، اگر ہو تو وہیں سے اٹھا لیں
+            if "output_url" in data["result"]:
+                 raw_url = data["result"]["output_url"]
+                 if raw_url:
+                     final_url = raw_url[0] if isinstance(raw_url, list) else raw_url
+                     # لیکن احتیاطاً پولنگ کریں گے تاکہ یقین ہو جائے تصویر تیار ہے
+                     # اگر آپ چاہیں تو یہاں فوراً return کر سکتے ہیں، لیکن پولنگ محفوظ ہے
+                     pass 
+
         else:
             print(f"⚠️ Upload Failed Logic: Code is {data.get('code')}")
             return None, "upload_failed"
@@ -63,15 +73,15 @@ def process_single_attempt(image_bytes: bytes, filename: str):
     status_url = GET_JOB_URL_TEMPLATE.format(job_id)
     print(f"\n⏳ [STEP 2] Starting Polling for Job: {job_id}")
     
-    # 30 بار چیک کریں گے (ہر 2 سیکنڈ بعد)
-    for i in range(30): 
+    # 40 بار چیک کریں گے (ہر 2 سیکنڈ بعد) - Total 80 Secs
+    for i in range(40): 
         time.sleep(2)
         try:
             res = requests.get(status_url, headers=HEADERS, timeout=15)
             
             # --- PRINT RAW POLLING RESPONSE ---
-            print(f"🔎 [POLL #{i+1}] Response: {res.text}")
-            # ----------------------------------
+            # یہ بہت زیادہ لاگز بھر دے گا، اگر چاہیں تو کمنٹ کر دیں
+            # print(f"🔎 [POLL #{i+1}] Response: {res.text}") 
 
             if res.status_code != 200:
                 print(f"   ⚠️ HTTP Error: {res.status_code}")
@@ -82,19 +92,24 @@ def process_single_attempt(image_bytes: bytes, filename: str):
             # Message check
             status_msg = res_data.get("message", {}).get("en", "Unknown")
             
-            # اگر Resource not exist آئے تو بتائے
+            # اگر اب بھی Resource not exist آئے (جو کہ v2 میں نہیں آنا چاہیے)
             if "Resource does not exist" in status_msg:
-                print("   ⚠️ Server says: Resource not found yet. Waiting...")
-                time.sleep(1) # تھوڑا اور انتظار
+                print(f"   ⚠️ Resource not found (Poll #{i+1}). Waiting...")
+                time.sleep(1)
                 continue
 
             # Result Check
             result = res_data.get("result", {})
-            if result and "output_url" in result:
+            
+            # v2 میں status چیک کریں
+            job_status = result.get("status")
+            if job_status == "done" and "output_url" in result:
                 raw_url = result["output_url"]
                 final_url = raw_url[0] if isinstance(raw_url, list) else raw_url
                 print(f"🎉 [SUCCESS] Final URL: {final_url}")
                 return final_url, "success"
+            else:
+                print(f"   ⏳ Processing... Status: {job_status}")
                 
         except Exception as e:
             print(f"   ❌ Polling Exception: {e}")
@@ -125,11 +140,11 @@ def get_enhanced_url_with_retry(image_bytes: bytes, filename: str):
             time.sleep(2)
             continue
 
-    raise HTTPException(status_code=408, detail="⚠️ Server is busy. Debug logs printed in console.")
+    raise HTTPException(status_code=408, detail="⚠️ Server is busy. Please try again later.")
 
 @app.get("/")
 def home():
-    return {"message": "DEBUG MODE ON: Check Railway Logs for full JSON responses."}
+    return {"message": "API Fixed: v2 Endpoints Synced."}
 
 @app.get("/enhance")
 def enhance_via_url(url: str = Query(..., description="Image URL")):
@@ -155,3 +170,4 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+    
