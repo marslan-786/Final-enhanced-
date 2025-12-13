@@ -2,16 +2,18 @@ import os
 from fastapi import FastAPI, HTTPException, Query
 import requests
 import time
-import uuid
 import random
 
 app = FastAPI()
 
 # --- CONFIGURATION ---
-# یہ وہ بیس سیریل ہے جس کے آخری حصے کو ہم رینڈم رکھیں گے لیکن شروع کا حصہ ترتیب وار بڑھائیں گے
-# تاکہ سرور کو لگے کہ یہ ویلڈ سیریلز ہیں۔
-SERIAL_PREFIX = "08003f498d526aeaefaf015e6db9"
-serial_counter = 1727 # آپ کے دیے گئے سیریل کا آخری حصہ (approx)
+
+# 1. Prefix Counter: یہ وہ نمبر ہے جو ہر بار بڑھے گا (8003, 8004, 8005...)
+prefix_counter = 8003 
+
+# 2. Static Suffix: یہ حصہ بالکل فکس رہے گا، یہ کبھی چینج نہیں ہوگا
+# (آپ کے اوریجنل سیریل کا باقی حصہ)
+STATIC_SUFFIX = "f498d526aeaefaf015e6db91727"
 
 # --- USER AGENTS POOL ---
 USER_AGENTS = [
@@ -29,19 +31,18 @@ CREATE_JOB_URL = "https://api.imgupscaler.ai/api/image-upscaler/v2/upscale/creat
 GET_JOB_URL_TEMPLATE = "https://api.imgupscaler.ai/api/image-upscaler/v1/universal_upscale/get-job/{}"
 
 def generate_smart_headers():
-    """Generates headers that mimic a real device switching identity"""
-    global serial_counter, current_headers
+    """Generates headers with incrementing prefix but FIXED suffix"""
+    global prefix_counter, current_headers
     
-    # 1. Serial Logic: Increment Counter + Random Hex Suffix
-    serial_counter += 1
-    # سیریل کا آخری حصہ (4 ہندسے) ترتیب وار بڑھا رہے ہیں
-    suffix = f"{serial_counter:04d}" 
-    # تھوڑا سا رینڈم سالٹ بھی ڈالیں تاکہ بالکل مشینی نہ لگے
-    random_part = uuid.uuid4().hex[:4]
+    # --- LOGIC UPDATE ---
+    # ہر بار صرف شروع کا نمبر بڑھائیں
+    prefix_counter += 1
     
-    new_serial = f"{SERIAL_PREFIX}{random_part}{suffix}"[:32] # Max 32 chars
+    # فارمولا: "0" + "8004" + "f498d..."
+    # رزلٹ: 08004f498d526aeaefaf015e6db9
+    new_serial = f"0{prefix_counter}{STATIC_SUFFIX}"
     
-    # 2. Pick Random User Agent
+    # User Agent رینڈم رکھیں تاکہ بالکل ایک جیسا نہ لگے
     ua = random.choice(USER_AGENTS)
     
     current_headers = {
@@ -52,14 +53,14 @@ def generate_smart_headers():
         "accept": "*/*",
         "accept-language": "en-US,en;q=0.9",
         "priority": "u=1, i",
-        "x-requested-with": "mark.via.gp", # Fake App Package ID
+        "x-requested-with": "mark.via.gp", 
         "sec-fetch-dest": "empty",
         "sec-fetch-mode": "cors",
         "sec-fetch-site": "same-site"
     }
-    print(f"🔄 Identity Rotated! Serial: {new_serial} | UA: {ua[:30]}...")
+    print(f"🔄 Identity Rotated! Serial: {new_serial}")
 
-# پہلی بار ہیڈرز جنریٹ کریں
+# پہلی بار ہیڈرز جنریٹ کریں (Start: 08004...)
 generate_smart_headers()
 
 def process_single_attempt(image_bytes: bytes, filename: str):
@@ -148,8 +149,9 @@ def get_enhanced_url_with_retry(image_bytes: bytes, filename: str):
     for attempt in range(3):
         print(f"\n🔹 Attempt {attempt + 1}/3")
         
-        # ہر کوشش سے پہلے نئی شناخت (اگر پچھلی فیل ہوئی ہو)
+        # اگر پہلی کوشش نہیں ہے، تو سیریل کا اگلا نمبر (08005...) استعمال کریں
         if attempt > 0:
+             print("⚠️ Previous attempt failed. Incrementing Serial Prefix...")
              generate_smart_headers()
         
         url, status = process_single_attempt(image_bytes, filename)
@@ -163,7 +165,6 @@ def get_enhanced_url_with_retry(image_bytes: bytes, filename: str):
             
         else:
             print("⚠️ Upload Error. Rotating Identity...")
-            # اگلی اٹیمٹ میں نیا ہیڈر خود بخود بن جائے گا
             time.sleep(2)
             continue
 
@@ -171,7 +172,7 @@ def get_enhanced_url_with_retry(image_bytes: bytes, filename: str):
 
 @app.get("/")
 def home():
-    return {"message": "API with Smart Headers & UA Rotation Running."}
+    return {"message": "API with Fixed Suffix & Incrementing Prefix Running."}
 
 @app.get("/enhance")
 def enhance_via_url(url: str = Query(..., description="Image URL")):
@@ -193,3 +194,4 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+    
