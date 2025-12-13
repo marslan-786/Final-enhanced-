@@ -3,30 +3,64 @@ from fastapi import FastAPI, HTTPException, Query
 import requests
 import time
 import uuid
+import random
 
 app = FastAPI()
 
-# --- CONFIGURATION (Based on Captured Logs) ---
-# بیسک ہیڈرز جو ہر ریکویسٹ میں جائیں گے
-BASE_HEADERS = {
-    "product-serial": "e2130ffcfb9fdfe36701eeb431b2d4fc", # Default start serial
-    "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/29.0 Chrome/136.0.0.0 Mobile Safari/537.36",
-    "Origin": "https://imgupscaler.ai",
-    "Referer": "https://imgupscaler.ai/",
-    "accept": "*/*",
-    "accept-language": "en-US,en;q=0.9",
-    "priority": "u=1, i"
-}
+# --- CONFIGURATION ---
+# یہ وہ بیس سیریل ہے جس کے آخری حصے کو ہم رینڈم رکھیں گے لیکن شروع کا حصہ ترتیب وار بڑھائیں گے
+# تاکہ سرور کو لگے کہ یہ ویلڈ سیریلز ہیں۔
+SERIAL_PREFIX = "08002f498d526aeaefaf015e6db9"
+serial_counter = 1727 # آپ کے دیے گئے سیریل کا آخری حصہ (approx)
 
-# Endpoints (Confirmed from Logs)
+# --- USER AGENTS POOL ---
+USER_AGENTS = [
+    "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 11; SM-A525F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 10; VOG-L29) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Mobile Safari/537.36"
+]
+
+current_headers = {}
+
+# Endpoints
 CREATE_JOB_URL = "https://api.imgupscaler.ai/api/image-upscaler/v2/upscale/create-job"
 GET_JOB_URL_TEMPLATE = "https://api.imgupscaler.ai/api/image-upscaler/v1/universal_upscale/get-job/{}"
 
-def refresh_serial():
-    """اگر لمٹ ختم ہو جائے تو نیا سیریل بنائیں"""
-    new_serial = uuid.uuid4().hex
-    BASE_HEADERS["product-serial"] = new_serial
-    print(f"🔄 SERIAL CHANGED: {new_serial}")
+def generate_smart_headers():
+    """Generates headers that mimic a real device switching identity"""
+    global serial_counter, current_headers
+    
+    # 1. Serial Logic: Increment Counter + Random Hex Suffix
+    serial_counter += 1
+    # سیریل کا آخری حصہ (4 ہندسے) ترتیب وار بڑھا رہے ہیں
+    suffix = f"{serial_counter:04d}" 
+    # تھوڑا سا رینڈم سالٹ بھی ڈالیں تاکہ بالکل مشینی نہ لگے
+    random_part = uuid.uuid4().hex[:4]
+    
+    new_serial = f"{SERIAL_PREFIX}{random_part}{suffix}"[:32] # Max 32 chars
+    
+    # 2. Pick Random User Agent
+    ua = random.choice(USER_AGENTS)
+    
+    current_headers = {
+        "product-serial": new_serial,
+        "User-Agent": ua,
+        "Origin": "https://imgupscaler.ai",
+        "Referer": "https://imgupscaler.ai/",
+        "accept": "*/*",
+        "accept-language": "en-US,en;q=0.9",
+        "priority": "u=1, i",
+        "x-requested-with": "mark.via.gp", # Fake App Package ID
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-site"
+    }
+    print(f"🔄 Identity Rotated! Serial: {new_serial} | UA: {ua[:30]}...")
+
+# پہلی بار ہیڈرز جنریٹ کریں
+generate_smart_headers()
 
 def process_single_attempt(image_bytes: bytes, filename: str):
     job_id = None
@@ -37,24 +71,20 @@ def process_single_attempt(image_bytes: bytes, filename: str):
     try:
         print(f"\n🚀 [STEP 1] Uploading Image...")
         
-        # POST Request کے لیے ہیڈرز (Timezone لاگز میں موجود تھا)
-        post_headers = BASE_HEADERS.copy()
+        post_headers = current_headers.copy()
         post_headers["timezone"] = "Asia/Karachi"
-        post_headers["authorization"] = "" # لاگز میں خالی تھا، ہم بھی خالی بھیجیں گے
+        post_headers["authorization"] = "" 
         
         files = {"original_image_file": (filename, image_bytes, "image/jpeg")}
         
-        # API Call
         response = requests.post(CREATE_JOB_URL, headers=post_headers, files=files, timeout=60)
         
-        # Debug Response
         try:
             data = response.json()
         except:
             print(f"❌ Upload Failed (Non-JSON): {response.text[:100]}")
             return None, "upload_failed"
 
-        # Check Code
         if data.get("code") == 100000:
             job_id = data["result"]["job_id"]
             print(f"✅ Job Created: {job_id}")
@@ -69,8 +99,6 @@ def process_single_attempt(image_bytes: bytes, filename: str):
     # ==========================
     # STEP 1.5: SYNC WAIT
     # ==========================
-    # لاگز کے مطابق v2 سے v1 تک ڈیٹا جانے میں ٹائم لگتا ہے۔
-    # Resource does not exist سے بچنے کے لیے یہاں 5 سیکنڈ رکیں گے۔
     print("⏳ Waiting 5s for server sync...")
     time.sleep(5)
 
@@ -80,10 +108,9 @@ def process_single_attempt(image_bytes: bytes, filename: str):
     status_url = GET_JOB_URL_TEMPLATE.format(job_id)
     print(f"🔎 [STEP 2] Polling: {status_url}")
     
-    # GET Request کے ہیڈرز (لاگز میں Timezone نہیں تھا، اس لیے صرف Base Headers)
-    get_headers = BASE_HEADERS.copy()
+    get_headers = current_headers.copy()
     
-    for i in range(40): # 80 Seconds Max
+    for i in range(40): 
         time.sleep(2)
         try:
             res = requests.get(status_url, headers=get_headers, timeout=15)
@@ -95,13 +122,11 @@ def process_single_attempt(image_bytes: bytes, filename: str):
             res_data = res.json()
             status_msg = res_data.get("message", {}).get("en", "Unknown")
 
-            # اگر اب بھی Resource Not Found آئے
             if "Resource does not exist" in status_msg:
                 print(f"   ⚠️ Job not ready yet (Syncing...). Waiting...")
-                time.sleep(2) # مزید انتظار
+                time.sleep(2) 
                 continue
 
-            # Success Check
             result = res_data.get("result", {})
             if result and "output_url" in result:
                 raw_url = result["output_url"]
@@ -123,20 +148,22 @@ def get_enhanced_url_with_retry(image_bytes: bytes, filename: str):
     for attempt in range(3):
         print(f"\n🔹 Attempt {attempt + 1}/3")
         
+        # ہر کوشش سے پہلے نئی شناخت (اگر پچھلی فیل ہوئی ہو)
+        if attempt > 0:
+             generate_smart_headers()
+        
         url, status = process_single_attempt(image_bytes, filename)
         
         if status == "success":
             return {"status": "success", "url": url}
         
         elif status == "timeout":
-            print("❌ Timeout! Server slow. Rotating Serial...")
-            refresh_serial()
-            time.sleep(2)
+            print("❌ Timeout! Server slow. Rotating Identity...")
             continue 
             
         else:
-            print("⚠️ Upload Error. Rotating Serial...")
-            refresh_serial()
+            print("⚠️ Upload Error. Rotating Identity...")
+            # اگلی اٹیمٹ میں نیا ہیڈر خود بخود بن جائے گا
             time.sleep(2)
             continue
 
@@ -144,7 +171,7 @@ def get_enhanced_url_with_retry(image_bytes: bytes, filename: str):
 
 @app.get("/")
 def home():
-    return {"message": "API Updated based on captured Logs (v2 Create -> v1 Get)"}
+    return {"message": "API with Smart Headers & UA Rotation Running."}
 
 @app.get("/enhance")
 def enhance_via_url(url: str = Query(..., description="Image URL")):
@@ -166,4 +193,3 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
-                
