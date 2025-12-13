@@ -6,7 +6,6 @@ import uuid
 
 app = FastAPI()
 
-# --- Configuration ---
 HEADERS = {
     "product-serial": "08003f498d526aeaefaf015e6db91727",
     "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Mobile Safari/537.36",
@@ -20,104 +19,97 @@ GET_JOB_URL_TEMPLATE = "https://api.imgupscaler.ai/api/image-upscaler/v1/univers
 def refresh_serial():
     new_serial = uuid.uuid4().hex
     HEADERS["product-serial"] = new_serial
-    print(f"🔄 Serial Rotated! New: {new_serial}")
+    print(f"🔄 Switched to New Serial: {new_serial}")
 
-def get_enhanced_url(image_bytes: bytes, filename: str):
-    print(f"Starting Process for: {filename}")
-    
+def process_single_attempt(image_bytes: bytes, filename: str):
     job_id = None
     
-    # --- RETRY LOOP ---
-    for attempt in range(5):
-        try:
-            files = {
-                "original_image_file": (filename, image_bytes, "image/jpeg")
-            }
-            
-            response = requests.post(CREATE_JOB_URL, headers=HEADERS, files=files)
-            data = response.json()
-            code = data.get("code")
-            
-            if code == 100000:
-                job_id = data["result"]["job_id"]
-                print(f"✅ Upload Success! Job ID: {job_id}")
-                break 
-            
-            else:
-                print(f"⚠️ Internal API Error (Attempt {attempt+1}): {data}")
-                refresh_serial()
-                time.sleep(1)
-                continue
+    try:
+        files = {"original_image_file": (filename, image_bytes, "image/jpeg")}
+        response = requests.post(CREATE_JOB_URL, headers=HEADERS, files=files, timeout=30)
+        data = response.json()
+        
+        if data.get("code") == 100000:
+            job_id = data["result"]["job_id"]
+            print(f"✅ Uploaded. Job ID: {job_id}")
+        else:
+            print(f"⚠️ API Error: {data}")
+            return None, "upload_failed"
 
-        except Exception as e:
-            print(f"❌ Network Error on attempt {attempt}: {e}")
-            refresh_serial()
-            time.sleep(1)
-            continue
+    except Exception as e:
+        print(f"❌ Upload Connection Error: {e}")
+        return None, "connection_error"
 
-    if not job_id:
-        raise HTTPException(status_code=500, detail="⚠️ Server is busy (Upload Failed). Please try again.")
-
-    # 2. Polling (Status Check)
     status_url = GET_JOB_URL_TEMPLATE.format(job_id)
-    output_url = None
     
-    # --- CHANGE IS HERE (Fixing Timeout) ---
-    # پہلے range(20) تھا (40 سیکنڈ)، اب range(60) ہے (120 سیکنڈ / 2 منٹ)
-    print("⏳ Waiting for processing...")
-    for i in range(60): 
-        time.sleep(2) 
+    print("⏳ Polling started (Max 45s)...")
+    for i in range(22): 
+        time.sleep(2)
         try:
-            res = requests.get(status_url, headers=HEADERS)
+            res = requests.get(status_url, headers=HEADERS, timeout=10)
             res_data = res.json()
-            result = res_data.get("result", {})
             
+            status_msg = res_data.get("message", {}).get("en", "Unknown")
+            print(f"   Status: {status_msg}")
+
+            result = res_data.get("result", {})
             if result and "output_url" in result:
                 raw_url = result["output_url"]
-                if isinstance(raw_url, list):
-                    output_url = raw_url[0]
-                else:
-                    output_url = raw_url
-                break
-        except:
+                final_url = raw_url[0] if isinstance(raw_url, list) else raw_url
+                return final_url, "success"
+                
+        except Exception as e:
+            print(f"   Polling Error: {e}")
             continue
             
-    if not output_url:
-        print(f"❌ Timeout for Job ID: {job_id}")
-        raise HTTPException(status_code=408, detail="⚠️ Processing timeout. Image is too large or server is slow.")
+    return None, "timeout"
 
-    return {"status": "success", "url": output_url}
+def get_enhanced_url_with_retry(image_bytes: bytes, filename: str):
+    print(f"Starting Smart Process for: {filename}")
+    
+    for attempt in range(3):
+        print(f"\n🔹 Attempt {attempt + 1}/3")
+        
+        url, status = process_single_attempt(image_bytes, filename)
+        
+        if status == "success":
+            return {"status": "success", "url": url}
+        
+        elif status == "timeout":
+            print("❌ Timeout! Server stuck. Rotating Serial & Retrying...")
+            refresh_serial()
+            time.sleep(2)
+            continue 
+            
+        else:
+            print("⚠️ Upload failed. Rotating Serial & Retrying...")
+            refresh_serial()
+            time.sleep(2)
+            continue
 
+    raise HTTPException(status_code=408, detail="⚠️ Server is busy. Tried 3 times but failed.")
 
 @app.get("/")
 def home():
-    return {"message": "API Running with Extended Timeout (120s)."}
+    return {"message": "API with Smart Retry Logic Running."}
 
 @app.get("/enhance")
 def enhance_via_url(url: str = Query(..., description="Image URL")):
     try:
-        print(f"📥 Downloading from Telegram URL: {url}")
-        
-        # ٹیلیگرام سے ڈاؤن لوڈنگ کے لیے ٹائم آؤٹ بڑھایا گیا ہے
+        print(f"📥 Downloading Telegram Image...")
         img_response = requests.get(url, timeout=30)
         
         if img_response.status_code != 200:
-            print(f"❌ Failed to download from Telegram. Status: {img_response.status_code}")
-            raise HTTPException(status_code=400, detail="Could not download image from the provided link.")
+            raise HTTPException(status_code=400, detail="Telegram Download Failed")
         
-        print(f"✅ Downloaded {len(img_response.content)} bytes.")
-        
-        result = get_enhanced_url(img_response.content, "url_image.jpg")
-        return result
+        return get_enhanced_url_with_retry(img_response.content, "url_image.jpg")
 
     except HTTPException as http_e:
         return {"status": "error", "message": http_e.detail}
     except Exception as e:
-        print(f"🔥 Critical Unknown Error: {e}")
-        return {"status": "error", "message": "An unexpected error occurred."}
+        return {"status": "error", "message": "Unexpected Server Error"}
 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
-    
