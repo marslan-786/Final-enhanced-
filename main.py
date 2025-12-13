@@ -10,7 +10,7 @@ app = FastAPI()
 # --- CONFIGURATION ---
 # یہ وہ بیس سیریل ہے جس کے آخری حصے کو ہم رینڈم رکھیں گے لیکن شروع کا حصہ ترتیب وار بڑھائیں گے
 # تاکہ سرور کو لگے کہ یہ ویلڈ سیریلز ہیں۔
-SERIAL_PREFIX = "08002f498d526aeaefaf015e6db9"
+SERIAL_PREFIX = "08003f498d526aeaefaf015e6db9"
 serial_counter = 1727 # آپ کے دیے گئے سیریل کا آخری حصہ (approx)
 
 # --- USER AGENTS POOL ---
