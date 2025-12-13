@@ -24,32 +24,55 @@ def refresh_serial():
 def process_single_attempt(image_bytes: bytes, filename: str):
     job_id = None
     
+    # --- STEP 1: UPLOAD ---
     try:
         files = {"original_image_file": (filename, image_bytes, "image/jpeg")}
-        response = requests.post(CREATE_JOB_URL, headers=HEADERS, files=files, timeout=30)
-        data = response.json()
+        # Timeout بڑھا کر 60 سیکنڈ کر دیا ہے
+        response = requests.post(CREATE_JOB_URL, headers=HEADERS, files=files, timeout=60)
         
+        try:
+            data = response.json()
+        except:
+            print(f"⚠️ Non-JSON Response: {response.text[:200]}")
+            return None, "upload_failed"
+
         if data.get("code") == 100000:
             job_id = data["result"]["job_id"]
             print(f"✅ Uploaded. Job ID: {job_id}")
         else:
-            print(f"⚠️ API Error: {data}")
+            # اصل ایرر پرنٹ کریں
+            print(f"⚠️ API Error Response: {data}")
             return None, "upload_failed"
 
     except Exception as e:
         print(f"❌ Upload Connection Error: {e}")
         return None, "connection_error"
 
+    # --- STEP 2: POLLING ---
     status_url = GET_JOB_URL_TEMPLATE.format(job_id)
+    print("⏳ Polling started...")
     
-    print("⏳ Polling started (Max 45s)...")
-    for i in range(22): 
+    for i in range(30): # 60 Seconds Polling
         time.sleep(2)
         try:
-            res = requests.get(status_url, headers=HEADERS, timeout=10)
+            res = requests.get(status_url, headers=HEADERS, timeout=15)
+            
+            # اگر 404 یا 500 آئے
+            if res.status_code != 200:
+                print(f"   Status Code: {res.status_code} (Retrying...)")
+                continue
+
             res_data = res.json()
             
+            # ایرر میسج چیک کریں
             status_msg = res_data.get("message", {}).get("en", "Unknown")
+            
+            if "Resource does not exist" in status_msg:
+                 # اگر یہ ایرر آئے تو تھوڑا لمبا انتظار کریں
+                print(f"   ⚠️ Job Not Found (Syncing...). Waiting 3s...")
+                time.sleep(3)
+                continue
+            
             print(f"   Status: {status_msg}")
 
             result = res_data.get("result", {})
@@ -91,13 +114,13 @@ def get_enhanced_url_with_retry(image_bytes: bytes, filename: str):
 
 @app.get("/")
 def home():
-    return {"message": "API with Smart Retry Logic Running."}
+    return {"message": "API v2: Improved Error Logging & Timeout."}
 
 @app.get("/enhance")
 def enhance_via_url(url: str = Query(..., description="Image URL")):
     try:
         print(f"📥 Downloading Telegram Image...")
-        img_response = requests.get(url, timeout=30)
+        img_response = requests.get(url, timeout=45)
         
         if img_response.status_code != 200:
             raise HTTPException(status_code=400, detail="Telegram Download Failed")
