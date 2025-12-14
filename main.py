@@ -1,6 +1,7 @@
 import os
 import sys
-from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
+import threading
+from fastapi import FastAPI, HTTPException, Query
 import requests
 import time
 import random
@@ -8,15 +9,13 @@ import mimetypes
 
 app = FastAPI()
 
-# --- 🔒 HARDCODED CONFIGURATION (FINAL) ---
-# یہ وہ ٹوکنز ہیں جو آپ نے ٹرمکس میں ٹیسٹ کیے ہیں اور 100٪ کام کر رہے ہیں۔
+# --- 🔒 HARDCODED CONFIGURATION (Verified via Curl) ---
 RAILWAY_API_TOKEN = "2f404c04-9128-4f41-91b7-b9f32fa378d0"
 RAILWAY_SERVICE_ID = "ceb89720-2545-48ae-8657-059dd6e19464"
 RAILWAY_ENVIRONMENT_ID = "5f122bca-76aa-4fd5-a8a7-58d3e056f838"
 RAILWAY_GRAPHQL_URL = "https://backboard.railway.app/graphql/v2"
 
 # --- ROTATION LOGIC ---
-# ہر بار سرور اسٹارٹ ہونے پر رینڈم نمبر لے گا تاکہ پرانی آئی ڈی نہ آئے۔
 prefix_counter = random.randint(10000, 99000)
 STATIC_SUFFIX = "f498d526aeaefaf015e6db91727"
 
@@ -48,14 +47,15 @@ def generate_smart_headers():
     }
     print(f"🔄 Identity Rotated! Serial: {new_serial}")
 
-# پہلی بار چلانے کے لیے
 generate_smart_headers()
 
-def perform_redeploy():
-    """یہ فنکشن اب 100٪ کام کرے گا کیونکہ ٹوکنز فکس ہیں۔"""
-    print("\n🚨 CRITICAL: Triggering Railway Redeploy Sequence...")
+def perform_redeploy_sync():
+    """
+    یہ فنکشن ایک الگ تھریڈ میں چلے گا تاکہ مین سرور اسے روک نہ سکے۔
+    یہ بالکل وہی کام کرے گا جو آپ کی Curl کمانڈ کر رہی ہے۔
+    """
+    print("\n🚨 [THREAD] Sending Redeploy Signal to Railway...")
 
-    # نئی کمانڈ جو ٹرمکس میں پاس ہوئی تھی
     query = """
     mutation serviceInstanceRedeploy($serviceId: String!, $environmentId: String!) {
         serviceInstanceRedeploy(serviceId: $serviceId, environmentId: $environmentId)
@@ -67,31 +67,38 @@ def perform_redeploy():
         "environmentId": RAILWAY_ENVIRONMENT_ID
     }
     
-    headers = {"Authorization": f"Bearer {RAILWAY_API_TOKEN}"}
+    headers = {
+        "Authorization": f"Bearer {RAILWAY_API_TOKEN}",
+        "Content-Type": "application/json"
+    }
 
     try:
         response = requests.post(
             RAILWAY_GRAPHQL_URL, 
             json={"query": query, "variables": variables}, 
-            headers=headers
+            headers=headers,
+            timeout=10
         )
         
-        # اگر سکسس ہوا تو جواب میں ڈیٹا ہوگا، ایرر نہیں
-        if response.status_code == 200 and "errors" not in response.json():
-            print("✅ Redeploy Signal Sent! System restarting in 3 seconds...")
+        print(f"📡 Railway Response Code: {response.status_code}")
+        print(f"📡 Railway Response Body: {response.text}")
+
+        if response.status_code == 200 and "data" in response.json():
+            print("✅ SUCCESS: Redeploy trigger accepted!")
+            print("⏳ Waiting 3 seconds before hard kill...")
             time.sleep(3)
-            sys.exit(0) # سرور کو بند کر دے گا تاکہ ریلوے نیا چلا دے
+            print("💀 KILLING SERVER NOW.")
+            os._exit(0) # یہ سب سے اہم لائن ہے، یہ سرور کو زبردستی بند کر دے گا
         else:
-            print(f"❌ Redeploy Failed: {response.text}")
+            print("❌ FAILURE: Railway refused request.")
             
     except Exception as e:
-        print(f"❌ Connection Error during redeploy: {str(e)}")
+        print(f"❌ EXCEPTION during redeploy: {str(e)}")
 
 # --- DOWNLOADER ---
 def download_image_to_memory(url: str):
     print(f"📥 [MEMORY] Fetching from Source: {url}")
     try:
-        # ہیڈرز تاکہ ٹیلی گرام/گوگل وغیرہ بلاک نہ کریں
         response = requests.get(url, headers={"User-Agent": random.choice(USER_AGENTS)}, timeout=30)
         if response.status_code != 200: return None, None, None
         
@@ -107,7 +114,6 @@ def download_image_to_memory(url: str):
 def process_single_attempt(image_bytes: bytes, filename: str, mime_type: str):
     job_id = None
     try:
-        # 1. Upload
         files = {"original_image_file": (filename, image_bytes, mime_type)}
         response = requests.post(CREATE_JOB_URL, headers=current_headers, files=files, timeout=60)
         data = response.json()
@@ -121,7 +127,7 @@ def process_single_attempt(image_bytes: bytes, filename: str, mime_type: str):
     except Exception:
         return None, "connection_error"
 
-    # 2. Polling
+    # Polling Logic
     time.sleep(5)
     status_url = GET_JOB_URL_TEMPLATE.format(job_id)
     
@@ -139,13 +145,11 @@ def process_single_attempt(image_bytes: bytes, filename: str, mime_type: str):
             
     return None, "timeout"
 
-def get_enhanced_url_logic(image_bytes: bytes, filename: str, mime_type: str, background_tasks: BackgroundTasks):
-    
-    # صرف 2 Attempts کا لوپ (0 اور 1)
+def get_enhanced_url_logic(image_bytes: bytes, filename: str, mime_type: str):
+    # صرف 2 Attempts
     for attempt in range(2):
         print(f"\n🔹 Attempt {attempt + 1}/2")
         
-        # دوسری باری پر (attempt 1) ہیڈر روٹیٹ کرو
         if attempt == 1:
              print("⚠️ First attempt failed. Rotating Identity...")
              generate_smart_headers()
@@ -158,27 +162,29 @@ def get_enhanced_url_logic(image_bytes: bytes, filename: str, mime_type: str, ba
         print("⚠️ Failed.")
         time.sleep(2)
 
-    # اگر لوپ ختم ہو گیا اور کامیابی نہیں ملی، تو تیسری باری نہیں ہوگی۔
-    # سیدھا ری ڈیپلائے
-    print("\n❌ Both attempts failed. Initiating Redeploy...")
-    background_tasks.add_task(perform_redeploy)
+    # --- FINAL FAIL STATE ---
+    print("\n❌ Both attempts failed. INITIATING REDEPLOY THREAD...")
     
-    # یوزر کو 503 بھیجیں گے تاکہ اسے پتہ چلے سرور فریش ہو رہا ہے
-    raise HTTPException(status_code=503, detail="Server limits reached. Refreshing IP... Please try again in 1 minute.")
+    # تھریڈ سٹارٹ کریں تاکہ یہ فوراً چلے
+    t = threading.Thread(target=perform_redeploy_sync)
+    t.start()
+    
+    # یوزر کو 503 بھیج دیں
+    raise HTTPException(status_code=503, detail="Server limits reached. Refreshing System... Try again in 1 minute.")
 
 @app.get("/")
 def home():
-    return {"message": "Final Upscaler Active", "prefix": prefix_counter}
+    return {"message": "Final Upscaler V3 Active", "id": prefix_counter}
 
 @app.get("/enhance")
-def enhance_via_url(background_tasks: BackgroundTasks, url: str = Query(..., description="Image URL")):
+def enhance_via_url(url: str = Query(..., description="Image URL")):
     img_bytes, filename, mime_type = download_image_to_memory(url)
     
     if not img_bytes:
-        return {"status": "error", "message": "Failed to download image from source."}
+        return {"status": "error", "message": "Failed to download image."}
     
     try:
-        return get_enhanced_url_logic(img_bytes, filename, mime_type, background_tasks)
+        return get_enhanced_url_logic(img_bytes, filename, mime_type)
     except HTTPException as http_e:
         raise http_e
     except Exception as e:
